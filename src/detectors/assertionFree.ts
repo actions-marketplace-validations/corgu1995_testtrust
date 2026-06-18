@@ -51,6 +51,7 @@ import {
   getPosition,
   getTestBlocks,
   hasRealAssertion,
+  hasTypeLevelAssertion,
 } from "./shared.js";
 import type { TestBlock } from "./shared.js";
 
@@ -460,8 +461,14 @@ function classifyTest(
 ): Finding | undefined {
   const assertions = getAssertions(body);
 
-  // ----- Case A: the body has NO real assertion at all --------------------
+  // ----- Case A: the body has NO real RUNTIME assertion at all ------------
   if (assertions.length === 0) {
+    // A TYPE-LEVEL test (`util.assertEqual<A, B>(true)`, `expectTypeOf(x)
+    // .toEqualTypeOf<T>()`, a `type v = Expect<Equal<A, B>>` alias, or a
+    // `@ts-expect-error` line) asserts at COMPILE time and so has no runtime
+    // assertion — but it is a legitimate test, not assertion-free. Emit nothing.
+    if (hasTypeLevelAssertion(body)) return undefined;
+
     // AC4: maybe it asserts through a local helper. Resolve best-effort.
     const helper = analyzeHelpers(ctx.sourceFile, body);
 

@@ -399,6 +399,89 @@ describe("assertion-free / snapshot-only detector", () => {
     });
   });
 
+  // --- Type-level tests assert at COMPILE time (precision fix) ----------------
+  describe("type-level tests are not assertion-free", () => {
+    it("does NOT flag a util.assertEqual<A, B>(true)-only test (zod idiom)", () => {
+      // The runtime `true` arg is noise; the assertion lives in the type args, so
+      // there is no runtime expect() — but this IS a real (compile-time) test.
+      const src = `
+        import { it } from "vitest";
+        import { util } from "../helpers";
+        it("number equals number", () => {
+          util.assertEqual<number, number>(true);
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a type alias `type v = Expect<Equal<A, B>>`-only test (hono idiom)", () => {
+      // A type alias that fails to compile when the two types diverge: a
+      // compile-time assertion with NO runtime call at all.
+      const src = `
+        import { it } from "vitest";
+        import type { Expect, Equal } from "../helpers";
+        it("the shapes match", () => {
+          type Actual = { a: number };
+          type Expected = { a: number };
+          type v = Expect<Equal<Expected, Actual>>;
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag an expectTypeOf(x).toEqualTypeOf<T>()-only test", () => {
+      const src = `
+        import { it, expectTypeOf } from "vitest";
+        it("x has type T", () => {
+          expectTypeOf(x).toEqualTypeOf<T>();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a @ts-expect-error + deliberately type-wrong line", () => {
+      // The directive asserts the next line MUST be a type error; deleting the
+      // bug would break compilation. A legitimate negative type test.
+      const src = `
+        import { it } from "vitest";
+        it("rejects a bad argument type", () => {
+          // @ts-expect-error - n must be a number
+          add("not a number", 1);
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag tsd-style assertType<T>(x) / expectType<T>(x) / expectError(...)", () => {
+      const src = `
+        import { it } from "vitest";
+        import { assertType, expectType, expectError } from "tsd";
+        it("assorted tsd assertions", () => {
+          assertType<string>(s);
+          expectType<number>(n);
+          expectError(broken());
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("REGRESSION: still flags a genuinely empty it() as assertion-free", () => {
+      // The type-level escape hatch must not leak into the truly-empty case: a
+      // body with no compile-time assertion signal stays a confident warn.
+      const src = `
+        import { it } from "vitest";
+        it("x", () => {});
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(ASSERTION_FREE);
+      expect(findings[0]!.severity).toBe("warn");
+      expect(findings[0]!.testName).toBe("x");
+      expect(findings[0]!.message).toContain("no assertion");
+    });
+  });
+
   // --- AC5: node:assert is a real assertion ----------------------------------
   describe("AC5: node:assert is recognised (no false assertion-free)", () => {
     it("does NOT flag a member-form assert.equal(...)", () => {

@@ -34,6 +34,7 @@ import type {
   Node,
   PropertyAccessExpression,
   SourceFile,
+  TypeAliasDeclaration,
 } from "ts-morph";
 
 // The `Finding` type (src/types.ts) is the frozen wire format every detector
@@ -221,6 +222,49 @@ ASSERT_NEGATED_METHODS.delete("isNull");
 
 /** Placeholder used in {@link TestBlock.titlePath} for non-literal titles. */
 const DYNAMIC_TITLE = "<dynamic>";
+
+// --- Type-level (compile-time) assertion vocabularies -----------------------
+//
+// Type-level tests assert at COMPILE time and carry no runtime `expect()`; the
+// arg they sometimes pass (e.g. the `true` in `assertEqual<A, B>(true)`) is just
+// noise — the real assertion lives in the type arguments or in a type alias that
+// fails to compile when the types diverge. These vocabularies let
+// {@link hasTypeLevelAssertion} recognise the common idioms WITHOUT type info.
+
+/** Bare callee final-names that are themselves type-level assertion helpers
+ *  (`expectTypeOf(x).toEqualTypeOf<T>()`, `assertType<T>(x)`, tsd's
+ *  `expectType<T>(x)` / `expectError(...)`, etc.). */
+const TYPE_ASSERT_CALLEES = new Set([
+  "expectTypeOf",
+  "assertType",
+  "expectType",
+  "expectError",
+  "expectNotType",
+  "expectAssignable",
+  "expectNotAssignable",
+  "assertNever",
+]);
+
+/** Member-access final-names that mark a type-level assertion regardless of the
+ *  receiver, covering `util.assertEqual<...>()` / `util.assertType<...>()`. */
+const TYPE_ASSERT_MEMBER_METHODS = new Set(["assertEqual", "assertType"]);
+
+/** Identifiers that, when referenced inside a `type X = ...` alias, indicate the
+ *  `Expect<Equal<A, B>>` family — a type alias that fails to compile when the
+ *  types differ, i.e. a compile-time assertion with NO runtime call at all. */
+const TYPE_ASSERT_ALIAS_REFS = new Set([
+  "Expect",
+  "Equal",
+  "AssertEqual",
+  "IsExact",
+  "TypeEqual",
+  "Assert",
+]);
+
+/** The TypeScript directive that asserts the very next line is a type error — a
+ *  deliberate compile-time assertion. We match it in source text (it lives in a
+ *  comment, which is not part of the AST). */
+const TS_EXPECT_ERROR_DIRECTIVE = "@ts-expect-error";
 
 // ----------------------------------------------------------------------------
 // Low-level, never-throwing node utilities
@@ -649,6 +693,138 @@ export function getMatcherNames(scope: Node | undefined): Set<string> {
     if (a.matcher !== undefined) names.add(a.matcher);
   }
   return names;
+}
+
+/**
+ * Does `scope` (a test body) contain any COMPILE-TIME assertion signal? These
+ * are legitimate tests that assert at type-check time and therefore have no
+ * runtime `expect(...)` / `node:assert` call — {@link hasRealAssertion} returns
+ * `false` for them even though they verify something real. Detectors use this to
+ * avoid the precision false-positive of flagging a type-level test as
+ * assertion-free.
+ *
+ * Returns `true` when ANY of the following hold inside `scope`:
+ *   - a call whose callee FINAL name is a known type-assertion helper
+ *     (`expectTypeOf`, `assertType`, `expectType`, `expectError`, `expectNotType`,
+ *     `expectAssignable`, `expectNotAssignable`, `assertNever`); OR a member call
+ *     whose final member is `.assertEqual` / `.assertType` (covers
+ *     `util.assertEqual<...>()`); OR a BARE `assertEqual(...)` call that carries
+ *     explicit type arguments (`assertEqual<A, B>(true)` — the runtime arg is
+ *     noise, the assertion is in the type args);
+ *   - the source text of `scope` contains a `@ts-expect-error` directive (a
+ *     deliberate "this line must be a type error" assertion living in a comment);
+ *   - a `type X = ...` alias inside `scope` whose type references an identifier in
+ *     {@link TYPE_ASSERT_ALIAS_REFS} (the `Expect<Equal<A, B>>` idiom — a type
+ *     alias that fails to compile when the types diverge).
+ *
+ * Purely syntactic and conservative: anything we are unsure about yields `false`.
+ * Wrapped end-to-end so it NEVER throws.
+ */
+export function hasTypeLevelAssertion(scope: Node | undefined): boolean {
+  if (scope === undefined) return false;
+  try {
+    // Cheap, whole-scope text check first: `@ts-expect-error` lives in a comment,
+    // which is trivia (not an AST node), so we can only see it in the raw text.
+    try {
+      if (scope.getText().includes(TS_EXPECT_ERROR_DIRECTIVE)) return true;
+    } catch {
+      // fall through to the AST walk
+    }
+
+    let found = false;
+    scope.forEachDescendant((node, traversal) => {
+      if (found) {
+        traversal.stop();
+        return;
+      }
+
+      // (a) Type-assertion CALLS.
+      const call = node.asKind(SyntaxKind.CallExpression);
+      if (call !== undefined && isTypeAssertionCall(call)) {
+        found = true;
+        traversal.stop();
+        return;
+      }
+
+      // (b) The `type X = Expect<Equal<A, B>>` alias idiom.
+      const alias = node.asKind(SyntaxKind.TypeAliasDeclaration);
+      if (alias !== undefined && typeAliasReferencesAssertHelper(alias)) {
+        found = true;
+        traversal.stop();
+      }
+    });
+    return found;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is `call` a type-level assertion call? Recognises three shapes (see
+ * {@link hasTypeLevelAssertion}): a known bare/last-name helper, a member call
+ * ending in `.assertEqual`/`.assertType`, or a bare `assertEqual` that carries
+ * explicit type arguments. Never throws.
+ */
+function isTypeAssertionCall(call: CallExpression): boolean {
+  try {
+    const expr = unwrapExpression(call.getExpression());
+    if (expr === undefined) return false;
+
+    // Member form: `<receiver>.assertEqual<...>()` / `.assertType<...>()` — the
+    // receiver is irrelevant, only the final member name matters.
+    const pae = expr.asKind(SyntaxKind.PropertyAccessExpression);
+    if (pae) {
+      const member = safeName(pae);
+      if (member !== undefined && TYPE_ASSERT_MEMBER_METHODS.has(member)) return true;
+    }
+
+    // Resolve the callee's final name (handles `ns.foo` -> "foo" via the shared
+    // resolver) for the known-helper and bare-`assertEqual` cases.
+    const name = getCalleeName(call);
+    if (name === undefined) return false;
+
+    if (TYPE_ASSERT_CALLEES.has(name)) return true;
+
+    // Bare `assertEqual<A, B>(true)`: only a type-level assertion when it carries
+    // explicit type arguments (a runtime-only `assertEqual(a, b)` is not ours).
+    if (name === "assertEqual" && hasExplicitTypeArguments(call)) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Does a call carry explicit type arguments (`f<A, B>(x)`)? Never throws. */
+function hasExplicitTypeArguments(call: CallExpression): boolean {
+  try {
+    return call.getTypeArguments().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does a `type X = ...` alias's right-hand side reference any identifier in
+ * {@link TYPE_ASSERT_ALIAS_REFS} (e.g. `Expect`, `Equal`)? We scan the type
+ * node's identifier descendants syntactically. Never throws.
+ */
+function typeAliasReferencesAssertHelper(alias: TypeAliasDeclaration): boolean {
+  try {
+    const typeNode = alias.getTypeNode();
+    if (typeNode === undefined) return false;
+    let referenced = false;
+    typeNode.forEachDescendant((node, traversal) => {
+      const id = node.asKind(SyntaxKind.Identifier);
+      if (id && TYPE_ASSERT_ALIAS_REFS.has(id.getText())) {
+        referenced = true;
+        traversal.stop();
+      }
+    });
+    return referenced;
+  } catch {
+    return false;
+  }
 }
 
 /**

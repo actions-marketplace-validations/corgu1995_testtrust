@@ -1,0 +1,75 @@
+{
+  "name": "testtrust",
+  "version": "0.1.0",
+  "description": "Grade whether your tests actually test anything. Catches AI/agent test-gaming — assertion-free, tautological, over-mocked, and silently-weakened tests — on the diff, before false-green CI ships a bug.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Santiago Parra",
+  "homepage": "https://github.com/corgu1995/testtrust#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/corgu1995/testtrust.git"
+  },
+  "bugs": {
+    "url": "https://github.com/corgu1995/testtrust/issues"
+  },
+  "keywords": [
+    "testing",
+    "test-quality",
+    "test-smells",
+    "mutation-testing",
+    "ai",
+    "ai-generated-code",
+    "code-review",
+    "ci",
+    "jest",
+    "vitest",
+    "ast",
+    "static-analysis",
+    "assertions"
+  ],
+  "engines": {
+    "node": ">=18.18"
+  },
+  "bin": {
+    "testtrust": "bin/testtrust.mjs"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "picocolors": "^1.1.1",
+    "tinyglobby": "^0.2.17",
+    "ts-morph": "^28.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "eslint": "^10.5.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^4.1.9"
+  }
+}
